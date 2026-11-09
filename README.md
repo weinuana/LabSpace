@@ -1,6 +1,6 @@
-# FastAPI + LangGraph 从零开发智能实验室预约系统
+# LabSpace · 智能实验室预约系统
 
-基于 **FastAPI + LangGraph + Vue 3 + MySQL** 的全栈 Agent 应用，包含 JWT 鉴权、
+基于 **FastAPI + LangGraph + Vue 3** 的全栈 Agent 应用，支持 SQLite 和 MySQL，包含 JWT 鉴权、
 预约时段冲突检测、RAG 知识库检索与 ReAct 式 Tool Calling 工作流。
 
 > 本项目为个人学习与实践项目，从零实现「前端 → 接口 → 数据库 → 大模型 Agent」的完整链路。
@@ -14,7 +14,7 @@
 - 登录接口 `POST /api/auth/login`
 - **密码使用 bcrypt 哈希存储**（数据库中不保存明文）
 - **JWT 登录鉴权**：登录成功后签发 token，受保护接口通过 `get_current_user` 依赖校验身份
-- 获取当前登录用户信息接口 `GET /api/user/info`
+- 获取当前登录用户信息接口 `GET /api/user/me`
 - 用户账号具备角色区分（`admin` 管理员 / `student` 学生）与启用状态（禁用用户无法登录）
 - **统一响应格式**（`Response` 封装 `code / message / data`）与**全局异常处理**
   （业务异常、HTTP 异常、参数校验异常、未捕获异常统一拦截）
@@ -35,7 +35,7 @@
   新密码经 bcrypt 重新哈希后入库，修改成功后前端清除登录态并要求重新登录
 - **用户管理**：用户列表支持分页与关键词模糊搜索（账号 / 名称），
   管理员可新增、编辑、删除用户，并设置角色（学生 / 管理员）与启用状态；
-  通过 `get_current_admin` 依赖做管理员权限校验，非管理员访问返回 403
+  通过 `get_current_admin` 依赖做管理员权限校验，非管理员访问返回业务码 `403`
 - **实验室管理**：实验室列表支持分页与关键词模糊搜索（名称 / 位置），
   管理员可新增、编辑、删除实验室，并可设置容量、开放时段、封面图与开放状态；
   创建与重命名时校验名称唯一性（更新时排除自身）
@@ -44,12 +44,12 @@
 - **设备管理**：设备列表支持分页、关键词模糊搜索（名称 / 型号）与按实验室筛选，
   管理员可新增、编辑、删除设备；设备通过外键关联所属实验室，
   列表返回时带出 `lab_name`（用 `joinedload` 预加载，避免 N+1 查询）
-- **学生端实验室列表**：学生登录后可查看实验室列表（只读，不可编辑）
-- **预约申请**：`POST /api/reservation`，创建预约前做多重校验 ——
-  日期不早于今天、结束时间晚于开始时间、当天预约不早于当前时刻、
-  实验室存在且处于开放状态、预约时段落在实验室开放时段内、设备存在且非维修状态；
-  并用**区间重叠算法**（`start < 目标结束 AND end > 目标开始`）检测同一实验室 /
-  同一设备在同一日期的时段冲突，避免重复预约
+- **学生端实验室列表**。学生登录后可以浏览实验室和所属设备，并从列表发起预约。实验室和设备资料由管理员维护。
+- **预约申请**。`POST /api/reservation` 校验预约日期、起止时间和资源状态。
+  预约日期最早为当天，当天预约的开始时间须在当前时刻或之后，结束时间须晚于开始时间。
+  实验室须存在且处于开放状态，预约时段须在其开放时段内。预约设备时，还会校验设备是否属于所选实验室且状态可用。
+  同一实验室或同一设备在同一日期的待审核、已通过记录参与**区间重叠检测**
+  （`start < 目标结束 AND end > 目标开始`），避免重复预约。
 - **预约记录查询**：`GET /api/reservation/list`，支持分页与按状态筛选；
   **学生只能看到自己的预约，管理员可见全部**；返回时补全 `user_name`、
   `lab_name`、`equipment_name` 与预约类型（实验室 / 设备）
@@ -57,32 +57,32 @@
   与状态（仅「待审核」可取消），取消后状态置为「已取消」
 - **预约审核**：`PUT /api/reservation/{id}/audit`（管理员），
   仅「待审核」记录可审核为「已通过」或「已拒绝」，校验状态合法性
+- **预约到期处理**。后端每分钟扫描待审核的预约，将已过结束时间的申请标为「已取消」。
 - **AI 智能助手**：`POST /api/ai/chat/stream`（SSE 流式），基于 LangChain 的
   `ChatOpenAI` 对接兼容 OpenAI 接口的大模型服务；用 System Prompt 约束模型
   只回答系统相关问题、不编造数据；前端用 `marked` 渲染 Markdown、
   `DOMPurify` 过滤 HTML 防 XSS
 - **流式对话**：后端用 `StreamingResponse` 推送 SSE 事件
   （`status` / `tool_start` / `tool_end` / `token` / `done` / `error`），
-  对话过程中实时展示工具调用进度与逐字输出；因 `EventSource` 无法携带 JWT，
-  前端改用 `fetch` + `ReadableStream` 手动解析，并处理 TCP 分片（buffer 缓存）
-  与 `content-type` 校验
+  对话过程中实时展示工具调用进度与流式输出。前端使用 `fetch` 发送带 JWT 的 POST 请求，
+  通过 `ReadableStream` 解析 SSE，缓冲 TCP 分片并校验 `Content-Type`。
 - **RAG 知识库检索**：把 `backend/data/kb/*.md` 中的实验室规则文档入库，
   用 `chromadb` 持久化向量 + `BAAI/bge-small-zh-v1.5` 中文 embedding；
-  检索时带相似度阈值过滤与排序，结果作为工具返回值供模型引用
+  检索时带相似度阈值过滤与排序，结果作为工具返回值供模型引用。[实验室规则文档](backend/data/kb/)
 - **LangGraph Agent（ReAct 工作流）**：用 `StateGraph` 编排
   `agent → tools_condition → tools → agent` 的循环，`ToolNode` 自动执行工具，
-  `recursion_limit=10` 防止死循环，`temperature=0` 保证工具调用稳定
+  `recursion_limit=20` 限制图执行步数，`temperature=0` 降低模型采样的随机性
 - **Agent 工具集**：`@tool` 定义 `search_lab_docs`（RAG 检索）、`list_open_labs`、
   `list_lab_equipments`、`create_lab_reservation`、`get_today`；
   工具内部异常以 JSON 回传模型，使其能自行修正参数后重试
-- **写操作二次确认**：SYSTEM_PROMPT 强制要求「创建预约前必须复述实验室 / 设备、
-  日期与时段并获得用户明确确认」，避免 Agent 擅自落库
+- **写操作二次确认**。系统提示词要求助手先复述实验室或设备、日期和时段，取得用户明确确认后再调用预约工具。
+  工具复用普通预约接口的业务校验，提交成功后进入待审核状态。
 
 ### 开发中
 
-- 预约时段可视化（日历 / 时间段选择器）
+- 预约时段可视化（在日历中查看可用和已占用时段）
 - 预约到期提醒
-- AI 助手支持查询预约状态、并在用户确认后代发预约
+- AI 助手支持查询预约状态
 - 接口单元测试
 
 ## 技术栈
@@ -95,121 +95,204 @@
 | AI · Agent | **LangGraph**（StateGraph / ToolNode / ReAct 工作流）、LangChain Core（`@tool` 工具定义）、LangChain OpenAI（ChatOpenAI） |
 | AI · 检索 | chromadb（向量库）、sentence-transformers（bge-small-zh-v1.5 中文 embedding） |
 | AI · 前端 | marked（Markdown 渲染）、DOMPurify（XSS 过滤） |
-| 数据库 | MySQL 8（`utf8mb4`） |
+| 数据库 | SQLite（本地体验）、MySQL 8（`utf8mb4`） |
 | 驱动 | PyMySQL |
 
 ## 项目结构
 
+以下列出仓库已跟踪的目录和文件。
+
+```text
+LabSpace/                                        # 项目根目录
+├── backend/                                     # FastAPI 后端
+│   ├── app/                                     # 后端应用包
+│   │   ├── api/                                 # HTTP 接口路由
+│   │   │   ├── __init__.py                      # 汇总各模块路由，统一挂载 /api 前缀
+│   │   │   ├── ai.py                            # 接收聊天请求并返回 SSE 事件流
+│   │   │   ├── auth.py                          # 登录与注册接口
+│   │   │   ├── equipment.py                     # 设备列表、新增、修改与删除接口
+│   │   │   ├── files.py                         # 校验上传文件，保存并返回访问地址
+│   │   │   ├── lab.py                           # 实验室列表、详情及管理接口
+│   │   │   ├── reservation.py                   # 提交、查询、取消及审核预约的接口
+│   │   │   └── user.py                          # 个人资料、修改密码及用户管理接口
+│   │   ├── common/                              # 公共响应结构与异常处理
+│   │   │   ├── __init__.py                      # 公共模块的包声明
+│   │   │   ├── exceptions.py                    # 业务异常定义及全局异常处理器
+│   │   │   └── response.py                      # 统一接口响应与分页结果模型
+│   │   ├── dependencies/                        # FastAPI 依赖注入模块
+│   │   │   ├── __init__.py                      # 依赖注入模块的包声明
+│   │   │   └── auth.py                          # 从 JWT 获取当前用户并校验管理员权限
+│   │   ├── models/                              # SQLAlchemy ORM 模型
+│   │   │   ├── __init__.py                      # 数据库模型模块的包声明
+│   │   │   ├── equipment.py                     # 设备表，通过外键关联所属实验室
+│   │   │   ├── lab.py                           # 实验室表，记录容量、开放时段及状态
+│   │   │   ├── reservation.py                   # 预约表，关联用户、实验室和可选设备
+│   │   │   └── user.py                          # 用户表，保存账号、角色及状态
+│   │   ├── schemas/                             # Pydantic 请求与响应模型
+│   │   │   ├── __init__.py                      # 数据模型校验模块的包声明
+│   │   │   ├── ai.py                            # 聊天消息与对话请求模型
+│   │   │   ├── auth.py                          # 登录、注册请求及登录响应模型
+│   │   │   ├── equipment.py                     # 设备新增、更新与响应模型
+│   │   │   ├── files.py                         # 上传文件信息及访问地址的响应模型
+│   │   │   ├── lab.py                           # 实验室新增、更新与响应模型
+│   │   │   ├── reservation.py                   # 预约创建、审核与响应模型
+│   │   │   └── user.py                          # 用户新增、更新、改密与响应模型
+│   │   ├── services/                            # 业务逻辑与 AI 助手服务
+│   │   │   ├── __init__.py                      # 业务服务模块的包声明
+│   │   │   ├── agent_service.py                 # LangGraph ReAct 工作流与流式事件
+│   │   │   ├── agent_tools.py                   # 知识库检索、资源查询、日期查询与预约工具
+│   │   │   ├── ai_service.py                    # 早期手写工具调用循环
+│   │   │   ├── auth_service.py                  # 校验登录凭据、签发 JWT 与注册账号
+│   │   │   ├── equipment_service.py             # 设备分页筛选及增删改
+│   │   │   ├── kb_service.py                    # 加载中文向量模型、构建 Chroma 索引并检索
+│   │   │   ├── lab_service.py                   # 实验室分页、详情、增删改及名称校验
+│   │   │   ├── reservation_service.py           # 预约时段校验、冲突检测、审核与到期扫描
+│   │   │   └── user_service.py                  # 个人资料、密码更新及用户管理
+│   │   ├── utils/                               # 通用鉴权与密码工具
+│   │   │   ├── __init__.py                      # 后端工具模块的包声明
+│   │   │   ├── jwt.py                           # JWT 的签发与解析
+│   │   │   └── password.py                      # bcrypt 密码哈希与校验
+│   │   ├── __init__.py                          # 后端应用的包声明
+│   │   ├── config.py                            # 读取 .env 并定义上传目录、大小及后缀限制
+│   │   ├── database.py                          # SQLAlchemy 数据库连接、会话与模型基类
+│   │   └── main.py                              # 注册路由、跨域和异常处理并启动到期扫描
+│   ├── data/                                    # 后端知识库数据目录
+│   │   └── kb/                                  # 供 RAG 检索的 Markdown 语料
+│   │       ├── 安全规范.md                      # 实验室防护、设备故障与离场规范
+│   │       ├── 开放时间.md                      # 实验室工作日与周末的开放时间说明
+│   │       ├── 设备使用.md                      # 设备预约要求与使用注意事项
+│   │       └── 预约规则.md                      # 预约提交、审核和取消规则说明
+│   ├── .env.example                             # 后端数据库、JWT 和模型服务的配置模板
+│   ├── requirements.txt                         # Python 依赖及版本
+│   ├── seed_demo.py                             # 初始化演示账号、实验室和设备
+│   └── seed_equipment.sql                       # 补齐实验室和设备演示数据的 SQL 脚本
+├── frontend/                                    # Vue 3 前端
+│   ├── .vscode/                                 # VS Code 项目配置
+│   │   └── extensions.json                      # 推荐安装 Vue 和 Prettier 扩展
+│   ├── public/                                  # Vite 直接发布的静态资源
+│   │   └── favicon.ico                          # 浏览器标签页图标
+│   ├── src/                                     # 前端应用源码
+│   │   ├── api/                                 # 各业务模块的 API 客户端
+│   │   │   ├── ai.js                            # 携带 JWT 发起聊天请求并解析 SSE 流
+│   │   │   ├── auth.js                          # 登录与注册请求
+│   │   │   ├── equipment.js                     # 设备分页查询及增删改请求
+│   │   │   ├── file.js                          # 用 FormData 提交上传文件
+│   │   │   ├── lab.js                           # 实验室列表、详情及增删改请求
+│   │   │   ├── reservation.js                   # 创建、查询、取消及审核预约的请求
+│   │   │   └── user.js                          # 个人资料、修改密码及用户管理请求
+│   │   ├── assets/                              # 供前端打包的样式与图片
+│   │   │   ├── css/                             # 样式资源
+│   │   │   │   └── global.css                   # 全局样式与主题变量
+│   │   │   └── imgs/                            # 图片资源
+│   │   │       └── logo.png                     # 项目 Logo 图片
+│   │   ├── components/                          # 页面间复用的 Vue 组件
+│   │   │   ├── AuthShowcase.vue                 # 登录与注册页共用的品牌展示区
+│   │   │   └── ReserveDialog.vue                # 实验室和设备共用的预约表单弹窗
+│   │   ├── layouts/                             # 页面布局组件
+│   │   │   └── Layout.vue                       # 顶部栏、按角色显示的侧边导航和内容区
+│   │   ├── router/                              # 前端路由模块
+│   │   │   └── index.js                         # 配置页面路由与未登录访问的跳转逻辑
+│   │   ├── utils/                               # 请求封装与登录状态工具
+│   │   │   ├── auth.js                          # 读写本地 JWT 和用户信息，处理退出登录
+│   │   │   ├── request.js                       # Axios 实例、请求鉴权与统一响应拦截
+│   │   │   └── user.js                          # 响应式用户信息与本地登录状态同步
+│   │   ├── views/                               # 页面级 Vue 组件
+│   │   │   ├── AIChat.vue                       # 流式聊天、工具调用进度与 Markdown 渲染及 HTML 清理
+│   │   │   ├── AuditReservation.vue             # 管理员按状态查看预约并审核申请
+│   │   │   ├── Equipment.vue                    # 管理员分页、筛选并维护设备
+│   │   │   ├── Home.vue                         # 工作台首页、数据概览与功能入口
+│   │   │   ├── Lab.vue                          # 管理员搜索并维护实验室资料
+│   │   │   ├── LabEquipment.vue                 # 浏览指定实验室的设备并发起预约
+│   │   │   ├── LabList.vue                      # 学生浏览实验室、查看设备及预约入口
+│   │   │   ├── Login.vue                        # 登录表单与登录后跳转
+│   │   │   ├── MyReservation.vue                # 查询、筛选及取消个人待审核预约
+│   │   │   ├── Password.vue                     # 修改密码表单与重新登录流程
+│   │   │   ├── Profile.vue                      # 查看、修改个人资料并上传头像
+│   │   │   ├── Register.vue                     # 新用户注册表单
+│   │   │   └── User.vue                         # 管理员分页查询并维护用户与角色
+│   │   ├── App.vue                              # Vue 根组件，承载页面路由出口
+│   │   └── main.js                              # 注册路由、Element Plus 和全局样式并挂载应用
+│   ├── .env.development                         # Vite 开发环境的 API 基础地址配置
+│   ├── .gitignore                               # 前端依赖、构建产物及工具缓存的忽略规则
+│   ├── .prettierrc.json                         # Prettier 代码格式配置
+│   ├── index.html                               # Vite HTML 入口与 Vue 挂载节点
+│   ├── jsconfig.json                            # 前端编辑器路径别名与排除目录
+│   ├── package-lock.json                        # npm 依赖的解析版本锁文件
+│   ├── package.json                             # 前端依赖、Node.js 版本要求及开发脚本
+│   ├── README.md                                # 前端开发、安装和构建说明
+│   └── vite.config.js                           # Vite 插件、路径别名与开发代理
+├── .gitignore                                   # 本地配置、依赖和运行产物的 Git 忽略规则
+├── jsconfig.json                                # 仓库根目录的 JavaScript 编辑器配置
+└── README.md                                    # 项目说明、启动步骤与接口文档
 ```
-lab-agent/
-├── backend/                        # 后端服务
-│   ├── app/
-│   │   ├── api/                    # 路由层（接口定义）
-│   │   │   ├── __init__.py         # 汇总各路由，统一挂载 /api 前缀
-│   │   │   ├── auth.py             # 登录 / 注册接口
-│   │   │   ├── user.py             # 用户信息与用户管理接口
-│   │   │   ├── lab.py              # 实验室管理接口
-│   │   │   ├── equipment.py        # 设备管理接口
-│   │   │   ├── reservation.py      # 预约接口
-│   │   │   ├── ai.py               # AI 对话接口
-│   │   │   └── files.py            # 文件上传接口
-│   │   ├── services/               # 业务逻辑层
-│   │   │   ├── auth_service.py     # 登录 / 注册业务处理
-│   │   │   ├── user_service.py     # 用户信息与用户管理业务处理
-│   │   │   ├── lab_service.py      # 实验室业务处理
-│   │   │   ├── equipment_service.py # 设备业务处理
-│   │   │   ├── reservation_service.py # 预约业务处理（时段冲突检测）
-│   │   │   ├── agent_service.py    # LangGraph Agent（StateGraph + ReAct 工作流）
-│   │   │   ├── agent_tools.py      # Agent 工具定义（@tool：查实验室/设备、RAG 检索、创建预约）
-│   │   │   ├── ai_service.py       # 旧版手写 Tool Calling 循环（保留供方案对比）
-│   │   │   └── kb_service.py       # 知识库检索（RAG：chromadb + 中文 embedding）
-│   │   ├── dependencies/           # 依赖注入
-│   │   │   └── auth.py             # get_current_user：从 token 解析当前用户
-│   │   ├── models/                 # ORM 模型（对应数据库表）
-│   │   │   ├── user.py             # 用户表
-│   │   │   ├── lab.py              # 实验室表
-│   │   │   ├── equipment.py        # 设备表（外键关联实验室）
-│   │   │   └── reservation.py      # 预约表（关联用户 / 实验室 / 设备）
-│   │   ├── common/                 # 公共组件
-│   │   │   ├── response.py         # 统一响应封装 Response
-│   │   │   └── exceptions.py       # 自定义业务异常与全局异常处理器
-│   │   ├── schemas/                # 请求 / 响应数据结构
-│   │   │   ├── auth.py             # LoginRequest / RegisterRequest / LoginResponse
-│   │   │   ├── user.py             # UserResponse / 创建与更新请求
-│   │   │   ├── lab.py              # LabResponse / 创建与更新请求
-│   │   │   ├── equipment.py        # EquipmentResponse / 创建与更新请求
-│   │   │   ├── reservation.py      # ReservationResponse / 创建请求
-│   │   │   └── ai.py               # ChatMessage / ChatRequest
-│   │   ├── utils/                  # 通用工具
-│   │   │   ├── jwt.py              # token 签发与解析
-│   │   │   └── password.py         # 密码哈希与校验
-│   │   ├── config.py               # 配置加载（读取 .env）
-│   │   ├── database.py             # 数据库连接与会话管理
-│   │   └── main.py                 # 应用入口
-│   ├── data/
-│   │   ├── kb/                     # 知识库文档（Markdown 语料，提交）
-│   │   └── chroma/                 # 向量库持久化（运行时生成，不提交）
-│   ├── requirements.txt            # Python 依赖
-│   ├── uploads/                    # 用户上传的文件（运行时生成，不提交）
-│   └── .env.example                # 环境变量模板
-│
-└── frontend/                       # 前端应用
-    ├── src/
-    │   ├── assets/                 # 静态资源（样式、图片）
-    │   ├── components/             # 公共组件
-    │   │   └── ReserveDialog.vue   # 预约弹窗（实验室 / 设备通用）
-    │   ├── layouts/                # 布局组件
-    │   │   └── Layout.vue          # 管理端整体框架
-    │   ├── views/                  # 页面组件
-    │   │   ├── Login.vue
-    │   │   ├── Register.vue
-    │   │   ├── Home.vue
-    │   │   ├── Lab.vue
-    │   │   ├── Profile.vue         # 个人中心（资料查看与修改）
-    │   │   ├── Password.vue        # 修改密码
-    │   │   ├── User.vue            # 用户管理（分页查询与增删改）
-    │   │   ├── Equipment.vue       # 设备管理（分页查询与增删改）
-    │   │   ├── LabList.vue         # 学生端实验室列表
-    │   │   ├── LabEquipment.vue    # 实验室设备查看
-    │   │   ├── MyReservation.vue   # 我的预约（列表 / 状态筛选 / 取消）
-    │   │   ├── AuditReservation.vue # 预约审核（管理员）
-    │   │   └── AIChat.vue          # AI 智能助手（Markdown 渲染 + XSS 过滤）
-    │   ├── api/                    # 接口定义
-    │   │   ├── auth.js             # 登录 / 注册接口
-    │   │   ├── user.js             # 用户信息与用户管理接口
-    │   │   ├── lab.js              # 实验室接口
-    │   │   ├── equipment.js        # 设备接口
-    │   │   ├── reservation.js      # 预约接口
-    │   │   ├── ai.js               # AI 对话接口
-    │   │   └── file.js             # 文件上传接口
-    │   ├── utils/                  # 工具模块
-    │   │   ├── request.js          # axios 封装（请求 / 响应拦截器）
-    │   │   ├── auth.js             # token 与用户信息的读写清理
-    │   │   └── user.js             # 用户信息响应式状态
-    │   ├── router/                 # 路由配置
-    │   │   └── index.js
-    │   ├── main.js                 # 前端入口
-    │   └── App.vue
-    ├── package.json
-    └── vite.config.js
-```
+
+本地配置和运行产物由 `.gitignore` 排除，包括 `backend/.env`、`backend/.envone`、SQLite 数据库
+`backend/lab_agent.db`、上传文件目录 `backend/uploads/` 和 Chroma 持久化向量索引目录 `backend/data/chroma/`。
 
 ## 快速开始
 
 ### 环境要求
 
 - Python 3.10+
-- Node.js 22.18+ 或 24.12+
-- MySQL 8.0+
+- Node.js 22.18+（22.x）或 24.12+
+- MySQL 8.0+（选择 MySQL 时）
+
+首次从 GitHub 获取项目时，在 PowerShell 中克隆仓库并进入项目根目录。
+
+```powershell
+git clone https://github.com/weinuana/LabSpace.git
+Set-Location LabSpace
+```
 
 ### 1. 准备数据库
 
-仓库内已提供 `backend/.env` 的 SQLite 本地配置，可以无需安装数据库直接体验。
-如需与视频技术栈完全一致，请在 MySQL 8 中创建数据库（表结构会在后端启动时自动创建）：
+本地体验可以使用 SQLite。首次运行时，在项目根目录从模板复制后端配置文件。已有 `backend/.env` 时，可沿用并检查其中的配置。
+
+```powershell
+Copy-Item backend/.env.example backend/.env
+```
+
+编辑 `backend/.env`，填入 SQLite 连接串和以下配置。数据库文件会在初始化演示数据或首次启动后端时创建。
+
+```dotenv
+DATABASE_URL=sqlite:///./lab_agent.db
+JWT_SECRET_KEY=replace-with-your-generated-key
+LLM_API_KEY=
+LLM_BASE_URL=https://api.example.com/v1
+LLM_MODEL=your-model
+KB_WARMUP_ENABLED=false
+```
+
+运行以下命令生成 JWT 密钥，并用输出替换 `JWT_SECRET_KEY` 的占位值。
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+如需使用 MySQL 8，请先创建数据库。后端启动时会自动创建缺失的表。
 
 ```sql
 CREATE DATABASE lab_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ```
+
+在 `.env` 中将 `DATABASE_URL` 改为 MySQL 连接串，并替换账号和密码。
+
+```dotenv
+DATABASE_URL=mysql+pymysql://YOUR_DB_USER:YOUR_DB_PASSWORD@127.0.0.1:3306/lab_agent
+```
+
+> **`.env` 配置项**。缺少必填字段时，后端会报 `ValidationError: Field required`。
+>
+> | 配置项 | 说明 |
+> |---|---|
+> | `DATABASE_URL` | SQLite 或 MySQL 连接串 |
+> | `JWT_SECRET_KEY` | JWT 签名密钥，使用上方命令生成 |
+> | `LLM_API_KEY` | 大模型 API 密钥。仅体验预约功能时可留空 |
+> | `LLM_BASE_URL` | 兼容 OpenAI API 的模型服务地址 |
+> | `LLM_MODEL` | 模型服务提供的名称，所选模型需支持工具调用 |
+> | `KB_WARMUP_ENABLED` | 可选。设为 `true` 时在启动阶段预加载向量模型与索引，设为 `false` 时在首次检索时加载 |
+>
+> 向量模型未缓存时需要联网下载。真实的 `.env` 由 Git 忽略。[配置模板](backend/.env.example)
 
 ### 2. 启动后端
 
@@ -223,9 +306,6 @@ python -m venv .venv
 # 安装依赖
 pip install -r requirements.txt
 
-# 仓库已放置可直接运行的本地 .env；接入 MySQL/大模型时再按模板修改
-# copy .env.example .env
-
 # 初始化演示账号、实验室与设备（幂等，可重复执行）
 python seed_demo.py
 
@@ -233,31 +313,16 @@ python seed_demo.py
 uvicorn app.main:app --reload
 ```
 
-> **⚠️ `.env` 必须包含以下配置项**，否则后端启动会报 `ValidationError: Field required`：
->
-> | 配置项 | 说明 |
-> |---|---|
-> | `DATABASE_URL` | MySQL 连接串 |
-> | `JWT_SECRET_KEY` | 随机密钥，用 `python -c "import secrets; print(secrets.token_urlsafe(32))"` 生成 |
-> | `LLM_API_KEY` | 大模型 API 密钥（AI 助手功能必需） |
-> | `LLM_BASE_URL` | 大模型接口地址，如 `https://api.deepseek.com` |
-> | `LLM_MODEL` | 模型名称，如 `deepseek-chat` |
->
-> 完整示例见 [backend/.env.example](backend/.env.example)。**不要提交真实的 `.env`**。
+> 后端使用 `from app.xxx` 形式的绝对导入，上面的命令从 `backend` 目录执行。
+> 从项目根目录直接执行上面的启动命令会报 `ModuleNotFoundError: No module named 'app'`。
+> 在根目录可用 `uvicorn app.main:app --reload --app-dir backend`。
+> SQLite 的相对数据库路径以当前工作目录为准，从根目录启动时可将 `DATABASE_URL` 改为指向同一数据库文件的绝对路径。
 
-> **重要**：必须在 `backend` 目录下启动。项目内部使用 `from app.xxx` 形式的绝对导入，
-> 换个目录运行会报 `ModuleNotFoundError: No module named 'app'`。
-> 若想从项目根目录启动，可改用 `uvicorn app.main:app --reload --app-dir backend`。
-
-**生成 JWT 密钥**（`.env` 中的 `JWT_SECRET_KEY` 务必替换为随机值，不要使用示例值）：
-
-```powershell
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-后端地址：<http://127.0.0.1:8000>
+后端地址为 <http://127.0.0.1:8000>。
 
 ### 3. 启动前端
+
+另开一个 PowerShell 窗口，从项目根目录执行。
 
 ```powershell
 cd frontend
@@ -266,10 +331,11 @@ npm install
 npm run dev
 ```
 
-前端地址：<http://localhost:5173>
+前端地址为 <http://localhost:5173>。Vite 开发服务器会将 `/api` 和 `/uploads` 转发到后端。
 
-演示账号：管理员 `admin / admin123`，学生 `student / student123`。
-AI 助手需要在 `backend/.env` 中填入兼容 OpenAI 协议的大模型密钥；其余预约业务可离线运行。
+演示账号为管理员 `admin / admin123` 和学生 `student / student123`。
+体验 AI 助手时，将 `LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL` 换成模型服务提供的值。
+其余预约业务可使用 SQLite 在本地运行。
 
 ## 接口文档
 
@@ -292,11 +358,12 @@ FastAPI 自动生成交互式文档，服务启动后访问：
 | POST | `/api/user` | 新增用户 | **是（管理员）** |
 | PUT | `/api/user/{user_id}` | 更新指定用户 | **是（管理员）** |
 | DELETE | `/api/user/{user_id}` | 删除指定用户 | **是（管理员）** |
-| GET | `/api/lab/list` | 实验室列表（分页 + 关键词搜索） | **是（管理员）** |
+| GET | `/api/lab/list` | 实验室列表（分页 + 关键词搜索） | **是** |
+| GET | `/api/lab/{lab_id}` | 查看指定实验室详情 | **是** |
 | POST | `/api/lab` | 新增实验室 | **是（管理员）** |
 | PUT | `/api/lab/{lab_id}` | 更新指定实验室 | **是（管理员）** |
 | DELETE | `/api/lab/{lab_id}` | 删除指定实验室 | **是（管理员）** |
-| GET | `/api/equipment/list` | 设备列表（分页 + 关键词 + 实验室筛选） | **是（管理员）** |
+| GET | `/api/equipment/list` | 设备列表（分页 + 关键词 + 实验室筛选） | **是** |
 | POST | `/api/equipment` | 新增设备 | **是（管理员）** |
 | PUT | `/api/equipment/{equipment_id}` | 更新指定设备 | **是（管理员）** |
 | DELETE | `/api/equipment/{equipment_id}` | 删除指定设备 | **是（管理员）** |
@@ -314,7 +381,7 @@ FastAPI 自动生成交互式文档，服务启动后访问：
 ```json
 {
   "username": "admin",
-  "password": "admin"
+  "password": "admin123"
 }
 ```
 
@@ -323,16 +390,17 @@ FastAPI 自动生成交互式文档，服务启动后访问：
 ```json
 {
   "code": 200,
-  "message": "操作成功",
+  "message": "登陆成功",
   "data": {
     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
     "user": {
       "id": 1,
       "username": "admin",
-      "name": "管理员",
+      "name": "系统管理员",
       "role": "admin",
       "phone": null,
       "email": null,
+      "avatar": null,
       "status": 1
     }
   }
@@ -343,8 +411,9 @@ FastAPI 自动生成交互式文档，服务启动后访问：
 
 ```json
 {
-  "code": 400,
-  "message": "账号或密码错误"
+  "code": 500,
+  "message": "账号或密码错误",
+  "data": null
 }
 ```
 
@@ -359,7 +428,7 @@ Authorization: Bearer <登录返回的 token>
 示例：
 
 ```powershell
-curl http://127.0.0.1:8000/api/user/info -H "Authorization: Bearer 你的token"
+curl.exe http://127.0.0.1:8000/api/user/me -H "Authorization: Bearer 你的token"
 ```
 
 token 有效期默认 24 小时（由 `.env` 的 `JWT_EXPIRE_HOURS` 控制），过期后需重新登录。
@@ -392,8 +461,7 @@ token 有效期默认 24 小时（由 `.env` 的 `JWT_EXPIRE_HOURS` 控制），
 | `avatar` | varchar(50) | 头像，可空 |
 | `status` | int | 状态：`0` 禁用、`1` 正常 |
 
-> 由于 `create_all` 只创建不存在的表、不会修改已有表结构。若修改了模型字段，
-> 需要手动 `DROP TABLE` 后重启服务重建。
+> `create_all` 负责创建缺失的表。已有表的字段变更需要通过数据库迁移或 `ALTER TABLE` 应用。
 
 ### 认证流程
 
@@ -420,8 +488,8 @@ get_current_user 依赖：解析 token → 查询用户 → 校验 status
 - [ ] `users.username` 增加唯一约束，避免出现同名账号
 - [ ] `verify_password` 增加异常兜底，兼容非 bcrypt 格式的历史数据
 - [ ] `get_current_user` 在用户不存在时返回 401 而非抛 500
-- [ ] 登录失败返回 HTTP 401/403 状态码，而非 `200 + code:400`
-- [ ] 密码长度校验（bcrypt 仅处理前 72 字节，超出会报错）
+- [ ] 登录失败使用对应的 HTTP 401/403 状态码（当前返回 HTTP 200 和业务码 `500`）
+- [ ] 为 bcrypt 的密码输入增加 72 字节上限校验
 
 ### AI / Agent
 
@@ -432,7 +500,7 @@ get_current_user 依赖：解析 token → 查询用户 → 校验 status
 ### 通用
 
 - [ ] 补充接口单元测试
-- [ ] 引入 Alembic 管理数据库迁移（当前依赖 `create_all`，改结构需手动 drop）
+- [ ] 引入 Alembic 管理数据库迁移（当前使用 `create_all` 创建缺失的表）
 
 ## License
 
